@@ -60,6 +60,10 @@ rank 0 sample 0: Hello, I'm a language model, ...
 ...
 ```
 
+As training progresses, the script will also save some metrics to the `log/log.txt` and
+`log/metrics.csv` files, which can be used to plot the training and validation loss, as well as the
+HellaSwag accuracy. You can see an example in the [`assets/metrics.csv`](assets/metrics.csv) file.
+
 ### Environment Variables
 
 The `dataset.py` script uses the following environment variables:
@@ -209,3 +213,8 @@ four plots from our training runs:
 - HellaSwag accuracy over time
 - Learning rate schedule
 - Training speed over time
+
+You can see an example in the [`assets/training_metrics.png`](assets/training_metrics.png)
+file—it'll look something like this (which is terrible since it's a 50 step training run):
+
+[![](assets/training_metrics.png)](assets/training_metrics.png)

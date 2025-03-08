@@ -1,5 +1,5 @@
 import os
-from generate import load_model, generate_text, GPTConfig
+from .generate import load_model, generate_text, GPTConfig
 from dotenv import load_dotenv
 
 load_dotenv()
