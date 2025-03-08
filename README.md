@@ -6,10 +6,18 @@ evaluated on the HellaSwag dataset. It's a simple toy model that is, mostly, And
 
 ## Usage
 
+First, make sure you have `uv` installed—you can
+[follow these instructions](https://docs.astral.sh/uv/getting-started/installation/). Then, you can
+install the dependencies by running the following command:
+
+```bash
+uv sync
+```
+
 Before training, you need to set up the training data.
 
 ```bash
-uv run dataset.py
+uv run src/gpt/dataset.py
 ```
 
 By default, the script expects a dataset in the `natural_reasoning/` directory. If no dataset is
@@ -21,7 +29,7 @@ to use.
 Once the dataset is set up, you can train the model using the following command:
 
 ```bash
-uv run train.py
+uv run src/gpt/train.py
 ```
 
 During training, the script will save the model checkpoints in the `log/` directory with a name like
@@ -86,7 +94,7 @@ And the following environment variables for training hyperparameters:
 To evaluate the model on the HellaSwag dataset, run the following command:
 
 ```bash
-uv run evaluate.py --checkpoint <path-to-checkpoint>
+uv run src/eval/evaluate.py --checkpoint <path-to-checkpoint>
 ```
 
 This will evaluate the model on the HellaSwag dataset and print the results, resembling the
@@ -120,7 +128,7 @@ the latest checkpoint in the `log/` directory, but you can override this by sett
 a few examples from the model, run the following command:
 
 ```bash
-uv run generate.py
+uv run src/eval/generate.py
 ```
 
 This will generate a few examples from the model and print them to the console, resembling the
@@ -150,7 +158,7 @@ You can also ask the model a question by running the following command, which wi
 with the model in a chat-like interface:
 
 ```bash
-uv run prompt.py
+uv run src/eval/prompt.py
 ```
 
 This will start a chat-like interface where you can interact with the model:
@@ -178,7 +186,7 @@ Lastly, if you want to peek at the source training data, you can run the followi
 the souce code's `PEEK_DATASET_PATH` variable to point to the dataset you want to peek at:
 
 ```bash
-uv run peek_dataset.py
+uv run src/eval/peek_dataset.py
 ```
 
 This will print the first 1000 tokens of the dataset to the console. It can be helpful in case you
@@ -191,7 +199,7 @@ To plot the training and validation loss, run the following command. It reads th
 in the `log/` directory, which is created by the `train.py` script.
 
 ```bash
-uv run plot_metrics.py
+uv run src/eval/plot_metrics.py
 ```
 
 This will generate a file on our `log/` directory called `training_metrics.png`, which will show
