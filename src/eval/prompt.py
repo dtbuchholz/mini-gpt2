@@ -1,5 +1,5 @@
 import os
-from .generate import load_model, generate_text, GPTConfig
+from eval.generate import load_model, generate_text, GPTConfig
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -15,11 +15,11 @@ def main():
     print("------------------------")
     print("Type 'quit' to exit")
     print("Type 'temp X' to change temperature (0.1-2.0)")
-    print("Type 'tokens X' to change max tokens (1-1000)")
+    print(f"Type 'tokens X' to change max tokens (1-{model.config.block_size})")
 
     # Default settings
-    temperature = 0.8
-    max_tokens = 200
+    temperature = 0.7
+    max_tokens = model.config.block_size // 2  # Start with half the context window
 
     while True:
         try:
@@ -44,11 +44,13 @@ def main():
             elif user_input.lower().startswith("tokens "):
                 try:
                     new_tokens = int(user_input.split()[1])
-                    if 1 <= new_tokens <= 1000:
+                    if 1 <= new_tokens <= model.config.block_size:
                         max_tokens = new_tokens
                         print(f"Max tokens set to {max_tokens}")
                     else:
-                        print("Max tokens must be between 1 and 1000")
+                        print(
+                            f"Max tokens must be between 1 and {model.config.block_size}"
+                        )
                 except:
                     print("Invalid tokens format")
                 continue
