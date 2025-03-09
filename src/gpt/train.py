@@ -822,7 +822,7 @@ for step in range(start_step, MAX_STEPS):
 
     if master_process:
         print(
-            f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
+            f"step {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
         )
         # Append to log file
         with open(log_file, "a") as f:
