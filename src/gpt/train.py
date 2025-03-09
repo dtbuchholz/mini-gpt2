@@ -8,6 +8,9 @@ import torch.nn as nn
 from torch.nn import functional as F
 from hellaswag import render_example, iterate_examples
 from dotenv import load_dotenv
+import numpy as np
+from collections import deque
+from torch.amp import GradScaler
 
 load_dotenv()
 
@@ -39,6 +42,13 @@ WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "0.1"))
 DATASET_PATH = os.environ.get("DATASET_PATH", "natural_reasoning")
 if not os.path.exists(DATASET_PATH):
     raise FileNotFoundError(f"Dataset path not found: ${DATASET_PATH}")
+
+
+# Track gradient norms for adaptive clipping
+grad_norm_history = deque(maxlen=100)
+CLIP_THRESHOLD = float(os.environ.get("GRAD_CLIP", "1.0"))
+ADAPTIVE_CLIP_MULTIPLIER = 2.0
+
 
 # -----------------------------------------------------------------------------
 
@@ -356,11 +366,19 @@ def get_most_likely_row(tokens, mask, logits):
     return pred_norm
 
 
+# Track gradient norms for adaptive clipping
+def get_adaptive_clip_threshold():
+    if len(grad_norm_history) < 10:
+        return CLIP_THRESHOLD
+    median_norm = np.median(list(grad_norm_history))
+    return max(CLIP_THRESHOLD, median_norm * ADAPTIVE_CLIP_MULTIPLIER)
+
+
 # -----------------------------------------------------------------------------
 # simple launch:
-# python train_gpt2.py
+# python train.py
 # DDP launch for e.g. 8 GPUs:
-# torchrun --standalone --nproc_per_node=8 train_gpt2.py
+# torchrun --standalone --nproc_per_node=8 train.py
 
 # run the training loop
 from torch.distributed import init_process_group, destroy_process_group
@@ -453,6 +471,10 @@ torch.set_float32_matmul_precision("high")
 model = GPT(GPTConfig(vocab_size=VOCAB_SIZE))
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
 model.to(device)
+
+# Initialize GradScaler for mixed precision training
+scaler = GradScaler(device=device_type) if device_type == "cuda" else None
+
 use_compile = (
     False  # torch.compile interferes with HellaSwag eval and Generation. TODO fix
 )
@@ -490,19 +512,53 @@ os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"log.txt")
 csv_file = os.path.join(log_dir, f"metrics.csv")
 
-# Initialize CSV file with headers
+# Track best model
+best_val_loss = float("inf")
+best_step = None
+
+# initialize CSV file with headers
 if master_process:
-    # Write headers only if file doesn't exist or is empty
+    # write headers only if file doesn't exist or is empty
     write_headers = not os.path.exists(csv_file) or os.path.getsize(csv_file) == 0
     if write_headers:
         with open(csv_file, "w") as f:
             f.write("step,type,value\n")
 
-    # Clear the log.txt file
+    # clear the log.txt file
     with open(log_file, "w") as f:
         pass
 
-for step in range(MAX_STEPS):
+# checkpoint loading
+start_step = 0
+if os.path.exists(os.path.join(log_dir, "latest.pt")) and master_process:
+    print("Found existing checkpoint, attempting to resume training...")
+    try:
+        checkpoint = torch.load(
+            os.path.join(log_dir, "latest.pt"), weights_only=False
+        )  # need to load weights_only=False for our trusted checkpoint
+        raw_model.load_state_dict(checkpoint["model"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        start_step = checkpoint["step"] + 1
+
+        # restore RNG states
+        if "rng_states" in checkpoint:
+            torch.set_rng_state(checkpoint["rng_states"]["torch"])
+            if (
+                torch.cuda.is_available()
+                and checkpoint["rng_states"]["cuda"] is not None
+            ):
+                torch.cuda.set_rng_state(checkpoint["rng_states"]["cuda"])
+            np.random.set_state(checkpoint["rng_states"]["numpy"])
+
+        print(f"Successfully resumed from step {start_step}")
+    except Exception as e:
+        print(f"Error loading checkpoint: {str(e)}")
+        print("Starting training from scratch...")
+        start_step = 0
+
+
+# training loop to start from start_step (e.g., resume training)
+for step in range(start_step, MAX_STEPS):
     t0 = time.time()
     last_step = step == MAX_STEPS - 1
 
@@ -529,21 +585,84 @@ for step in range(MAX_STEPS):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
             with open(csv_file, "a") as f:
                 f.write(f"{step},val_loss,{val_loss_accum.item():.6f}\n")
+
+            # Track best model
+            if val_loss_accum.item() < best_val_loss:
+                best_val_loss = val_loss_accum.item()
+                best_step = step
+                # Save best model checkpoint
+                best_checkpoint_path = os.path.join(log_dir, "best_model.pt")
+                checkpoint = {
+                    "model": raw_model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "config": raw_model.config,
+                    "step": step,
+                    "val_loss": val_loss_accum.item(),
+                    "rng_states": {
+                        "torch": torch.get_rng_state(),
+                        "cuda": (
+                            torch.cuda.get_rng_state()
+                            if torch.cuda.is_available()
+                            else None
+                        ),
+                        "numpy": np.random.get_state(),
+                    },
+                    "training_args": {
+                        "total_batch_size": TOTAL_BATCH_SIZE,
+                        "batch_size": B_CONFIG,
+                        "seq_length": T_CONFIG,
+                        "max_lr": MAX_LR,
+                        "min_lr": MIN_LR,
+                        "warmup_steps": WARMUP_STEPS,
+                        "max_steps": MAX_STEPS,
+                        "weight_decay": WEIGHT_DECAY,
+                    },
+                }
+                torch.save(checkpoint, best_checkpoint_path)
+                print(
+                    f"New best model at step {step} with validation loss {best_val_loss:.4f}"
+                )
+
+            # Regular checkpoint saving
             if step > 0 and (step % SAVE_CHECKPOINT_STEPS == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
                     "model": raw_model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
                     "config": raw_model.config,
                     "step": step,
                     "val_loss": val_loss_accum.item(),
+                    # Save RNG states
+                    "rng_states": {
+                        "torch": torch.get_rng_state(),
+                        "cuda": (
+                            torch.cuda.get_rng_state()
+                            if torch.cuda.is_available()
+                            else None
+                        ),
+                        "numpy": np.random.get_state(),
+                    },
+                    # Save training hyperparameters
+                    "training_args": {
+                        "total_batch_size": TOTAL_BATCH_SIZE,
+                        "batch_size": B_CONFIG,
+                        "seq_length": T_CONFIG,
+                        "max_lr": MAX_LR,
+                        "min_lr": MIN_LR,
+                        "warmup_steps": WARMUP_STEPS,
+                        "max_steps": MAX_STEPS,
+                        "weight_decay": WEIGHT_DECAY,
+                    },
                 }
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
 
+                # save a special "latest.pt" checkpoint for easy resumption
+                latest_path = os.path.join(log_dir, "latest.pt")
+                torch.save(checkpoint, latest_path)
+
     # once in a while evaluate hellaswag
-    if (step % 250 == 0 or last_step) and (not use_compile):
+    if (step > 0 and step % 250 == 0 or last_step) and (not use_compile):
         print(f"Evaluating HellaSwag at step {step}...")
         num_correct_norm = 0
         num_total = 0
@@ -625,18 +744,54 @@ for step in range(MAX_STEPS):
         x, y = x.to(device), y.to(device)
         if ddp:
             model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
+
+        # Check gradients before backward pass
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss = loss / grad_accum_steps
         loss_accum += loss.detach()
-        loss.backward()
+
+        # Use gradient scaling for mixed precision
+        if scaler is not None:
+            scaled_loss = scaler.scale(loss)
+            scaled_loss.backward()
+        else:
+            loss.backward()
+
     if ddp:
         dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+    # Check gradient norm before clipping
+    unclipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+    if (
+        torch.isnan(unclipped_norm)
+        or torch.isinf(unclipped_norm)
+        or unclipped_norm > CLIP_THRESHOLD * 10
+    ):
+        if master_process:
+            print(
+                f"WARNING: Gradient norm {unclipped_norm:.4f} too large. Skipping step."
+            )
+        optimizer.zero_grad()
+        continue
+
+    # Apply normal gradient clipping
+    clip_threshold = get_adaptive_clip_threshold()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_threshold)
+    if not torch.isnan(norm) and not torch.isinf(norm):
+        grad_norm_history.append(norm.item())
+
+    # Update with gradient scaling
     lr = get_lr(step)
     for param_group in optimizer.param_groups:
         param_group["lr"] = lr
-    optimizer.step()
+
+    if scaler is not None:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+
     if device_type == "cuda":
         torch.cuda.synchronize()
     t1 = time.time()
