@@ -91,6 +91,7 @@ And the following environment variables for training hyperparameters:
   `6e-5`.
 - `WARMUP_STEPS`: The number of steps to warm up the learning rate for. Default is `715`.
 - `MAX_STEPS`: The number of steps to train the model for. Default is `19073`.
+- `SAVE_CHECKPOINT_STEPS`: The number of steps to save the model checkpoint. Default is `5000`.
 - `WEIGHT_DECAY`: The weight decay to train the model with. Default is `0.1`.
 
 ## Evaluation
@@ -215,6 +216,6 @@ four plots from our training runs:
 - Training speed over time
 
 You can see an example in the [`assets/training_metrics.png`](assets/training_metrics.png)
-file—it'll look something like this (which is terrible since it's a 50 step training run):
+file—it'll look something like this (which is for a simple 1000 step training run):
 
 [![](assets/training_metrics.png)](assets/training_metrics.png)

@@ -32,6 +32,7 @@ MIN_LR = float(
 )  # MIN_LR as 10% of MAX_LR if not explicitly set
 WARMUP_STEPS = int(os.environ.get("WARMUP_STEPS", "715"))
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "19073"))  # ~1 epoch for 10B tokens
+SAVE_CHECKPOINT_STEPS = int(os.environ.get("SAVE_CHECKPOINT_STEPS", "5000"))
 WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "0.1"))
 
 # Dataset path, and generation if not exists
@@ -528,7 +529,7 @@ for step in range(MAX_STEPS):
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
             with open(csv_file, "a") as f:
                 f.write(f"{step},val_loss,{val_loss_accum.item():.6f}\n")
-            if step > 0 and (step % 5000 == 0 or last_step):
+            if step > 0 and (step % SAVE_CHECKPOINT_STEPS == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
