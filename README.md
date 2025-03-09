@@ -38,19 +38,84 @@ console:
 
 ```
 Configuration from environment:
-...
+Model config:
+- Block size: 1024
+- Vocab size: 50304
+- Layers: 4
+- Attention heads: 8
+- Embedding dim: 768
+- Bias: True
 
-total desired batch size: 65536
-=> calculated gradient accumulation steps: 32
+Training config:
+- Total batch size: 16384
+- Micro batch size: 4
+- Sequence length: 1024
+- Gradient accumulation steps: 4
+
+Training scale:
+- Tokens per batch: 16,384
+- Total steps: 5,000
+- Total tokens: 81,920,000 (0.08B)
+- For comparison:
+  • GPT-2:     40B tokens
+  • GPT-3:    300B tokens
+  • LLaMA:  1,000B tokens
+
+Optimization:
+- Max learning rate: 0.0006
+- Min learning rate: 5.9999999999999995e-05
+- Warmup steps: 100
+- Weight decay: 0.1
+- Device: mps
+
+DDP Configuration:
+- DDP rank: 0
+- DDP local rank: 0
+- DDP world size: 1
+
+total desired batch size: 16384
+=> calculated gradient accumulation steps: 4
 found 10 shards for split train
 found 1 shards for split val
-num decayed parameter tensors: 10, with 6,858,880 parameters
-num non-decayed parameter tensors: 18, with 3,584 parameters
+
+Model Scale Analysis:
+Architecture:
+- Layers:           4
+- Embedding dim:    768
+- Attention heads:  8
+- Head dim:         96
+- Sequence length:  1024
+- Vocab size:       50304
+
+Parameter count breakdown:
+- Embeddings:      39,419,904 parameters
+- Each block:      7,087,872 parameters
+  • Attention:     2,362,368
+  • MLP:           4,722,432
+  • Layer norms:   3,072
+- All 4 blocks:   28,351,488 parameters
+- Final layer norm: 1,536 parameters
+
+Total model size: 67,772,928 parameters (67.77M)
+Memory footprint:
+- Model (fp32):        258.5 MB
+- Model (fp16/bf16):   129.3 MB
+- Optimizer (AdamW):   517.1 MB
+
+Comparison to GPT-2 variants:
+- GPT-2 small  ( 124M params): 54.7% the size
+- GPT-2 medium ( 350M params): 19.4% the size
+- GPT-2 large  ( 774M params): 8.8% the size
+- GPT-2 xl     (1558M params): 4.3% the size
+num decayed parameter tensors: 18, with 67,731,456 parameters
+num non-decayed parameter tensors: 35, with 91,776 parameters
 using fused AdamW: False
-validation loss: 10.8410
+validation loss: 10.8561
+New best model at step 0 with validation loss 10.8561
 Evaluating HellaSwag at step 0...
 HellaSwag accuracy: 2460/10042=0.2450
-step     0 | loss: 10.837882 | lr 6.0000e-05 | norm: 1.4973 | dt: 259741.99ms | tok/sec: 252.31
+
+step     0 | loss: 10.837882 | lr: 6.0000e-05 | norm: 1.4973 | dt: 259741.99ms | tok/sec: 252.31
 ...
 
 validation loss: 8.0558

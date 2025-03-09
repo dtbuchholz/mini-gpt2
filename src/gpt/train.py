@@ -138,6 +138,7 @@ class GPTConfig:
     n_layer: int = N_LAYER  # number of layers
     n_head: int = N_HEAD  # number of heads
     n_embd: int = N_EMBD  # embedding dimension
+    bias: bool = BIAS  # whether to use bias in linear layers
 
 
 class GPT(nn.Module):
@@ -155,7 +156,7 @@ class GPT(nn.Module):
                 ln_f=nn.LayerNorm(config.n_embd),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=BIAS)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
 
         # Zero out embeddings for padding tokens
         with torch.no_grad():
@@ -296,6 +297,84 @@ class GPT(nn.Module):
             optim_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=use_fused
         )
         return optimizer
+
+
+def calculate_parameter_count(config: GPTConfig):
+    """Calculate and display detailed parameter counts and training statistics for the model."""
+    vocab_size = config.vocab_size
+    block_size = config.block_size
+    n_layer = config.n_layer
+    n_embd = config.n_embd
+    n_head = config.n_head
+    bias = config.bias
+
+    # Token + Position Embeddings (wte is shared with lm_head through weight tying)
+    embedding_params = (vocab_size + block_size) * n_embd
+
+    # Per transformer block parameters
+    attn_params = (n_embd * (3 * n_embd)) + (  # QKV projection
+        n_embd * n_embd
+    )  # Output projection
+    if bias:
+        attn_params += (3 * n_embd) + n_embd  # QKV and output projection biases
+
+    mlp_params = (n_embd * (4 * n_embd)) + (  # First linear
+        (4 * n_embd) * n_embd
+    )  # Second linear
+    if bias:
+        mlp_params += (4 * n_embd) + n_embd  # First and second linear biases
+
+    # Layer norms (gamma and beta)
+    ln_params = 4 * n_embd  # Two layer norms per block + final layer norm
+
+    # Total parameters per block
+    block_params = attn_params + mlp_params + ln_params
+
+    # Final layer norm parameters
+    final_ln_params = 2 * n_embd
+
+    # Calculate totals
+    total_embedding = embedding_params
+    total_blocks = n_layer * block_params
+    total_params = total_embedding + total_blocks + final_ln_params
+
+    # Model architecture comparisons
+    gpt2_sizes = {"small": 124, "medium": 350, "large": 774, "xl": 1558}
+
+    # Print breakdown
+    print("\nModel Scale Analysis:")
+    print(f"Architecture:")
+    print(f"- Layers:           {n_layer}")
+    print(f"- Embedding dim:    {n_embd}")
+    print(f"- Attention heads:  {n_head}")
+    print(f"- Head dim:         {n_embd // n_head}")
+    print(f"- Sequence length:  {block_size}")
+    print(f"- Vocab size:       {vocab_size}")
+
+    print("\nParameter count breakdown:")
+    print(f"- Embeddings:      {total_embedding:,} parameters")
+    print(f"- Each block:      {block_params:,} parameters")
+    print(f"  • Attention:     {attn_params:,}")
+    print(f"  • MLP:           {mlp_params:,}")
+    print(f"  • Layer norms:   {ln_params:,}")
+    print(f"- All {n_layer} blocks:   {total_blocks:,} parameters")
+    print(f"- Final layer norm: {final_ln_params:,} parameters")
+
+    print(f"\nTotal model size: {total_params:,} parameters ({total_params/1e6:.2f}M)")
+    print(f"Memory footprint:")
+    print(f"- Model (fp32):        {total_params * 4 / 1024 / 1024:.1f} MB")
+    print(f"- Model (fp16/bf16):   {total_params * 2 / 1024 / 1024:.1f} MB")
+    print(
+        f"- Optimizer (AdamW):   {total_params * 8 / 1024 / 1024:.1f} MB"
+    )  # 2 states per param
+
+    print("\nComparison to GPT-2 variants:")
+    current_size = total_params / 1e6
+    for name, size in gpt2_sizes.items():
+        ratio = current_size / size
+        print(f"- GPT-2 {name:6s} ({size:4d}M params): {ratio:.1%} the size")
+
+    return total_params
 
 
 # -----------------------------------------------------------------------------
@@ -444,16 +523,32 @@ if master_process:
     print(f"- Attention heads: {GPTConfig.n_head}")
     print(f"- Embedding dim: {GPTConfig.n_embd}")
     print(f"- Bias: {BIAS}")
+
     print("\nTraining config:")
     print(f"- Total batch size: {TOTAL_BATCH_SIZE}")
     print(f"- Micro batch size: {B_CONFIG}")
     print(f"- Sequence length: {T_CONFIG}")
+    print(f"- Gradient accumulation steps: {TOTAL_BATCH_SIZE // (B_CONFIG * T_CONFIG)}")
+
+    # Calculate total tokens that will be processed
+    tokens_per_step = TOTAL_BATCH_SIZE
+    total_tokens = tokens_per_step * MAX_STEPS
+    print(f"\nTraining scale:")
+    print(f"- Tokens per batch: {tokens_per_step:,}")
+    print(f"- Total steps: {MAX_STEPS:,}")
+    print(f"- Total tokens: {total_tokens:,} ({total_tokens/1e9:.2f}B)")
+    print(f"- For comparison:")
+    print(f"  • GPT-2:     40B tokens")
+    print(f"  • GPT-3:    300B tokens")
+    print(f"  • LLaMA:  1,000B tokens")
+
+    print("\nOptimization:")
     print(f"- Max learning rate: {MAX_LR}")
     print(f"- Min learning rate: {MIN_LR}")
     print(f"- Warmup steps: {WARMUP_STEPS}")
-    print(f"- Max steps: {MAX_STEPS}")
     print(f"- Weight decay: {WEIGHT_DECAY}")
     print(f"- Device: {device}")
+
     print(f"\nDDP Configuration:")
     print(f"- DDP rank: {ddp_rank}")
     print(f"- DDP local rank: {ddp_local_rank}")
@@ -486,6 +581,8 @@ if device_type == "cuda":
 # create model
 model = GPT(GPTConfig(vocab_size=PADDED_VOCAB_SIZE))
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
+if master_process:
+    calculate_parameter_count(model.config)
 model.to(device)
 
 # Initialize GradScaler for mixed precision training
@@ -575,11 +672,108 @@ if os.path.exists(os.path.join(log_dir, "latest.pt")) and master_process:
 
 # training loop to start from start_step (e.g., resume training)
 for step in range(start_step, MAX_STEPS):
-    t0 = time.time()
     last_step = step == MAX_STEPS - 1
 
-    # once in a while evaluate our validation loss
-    # note: the validation loss ranges from 0 to log(vocab_size); e.g., log(50257) ≈ 10.8
+    # Start measuring training time
+    t0_step = time.time()
+
+    # do one step of the optimization
+    model.train()
+    optimizer.zero_grad()
+    loss_accum = 0.0
+    for micro_step in range(grad_accum_steps):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
+        if ddp:
+            model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
+
+        # Check gradients before backward pass
+        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+            logits, loss = model(x, y)
+        loss = loss / grad_accum_steps
+        loss_accum += loss.detach()
+
+        # Use gradient scaling for mixed precision
+        if scaler is not None:
+            scaled_loss = scaler.scale(loss)
+            scaled_loss.backward()
+        else:
+            loss.backward()
+
+    if ddp:
+        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+
+    # Check gradient norm before clipping
+    unclipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
+    if (
+        torch.isnan(unclipped_norm)
+        or torch.isinf(unclipped_norm)
+        or unclipped_norm > CLIP_THRESHOLD * 10
+    ):
+        if master_process:
+            print(
+                f"WARNING: Gradient norm {unclipped_norm:.4f} too large. Skipping step."
+            )
+        optimizer.zero_grad()
+        continue
+
+    # Apply normal gradient clipping
+    clip_threshold = get_adaptive_clip_threshold()
+    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_threshold)
+    if not torch.isnan(norm) and not torch.isinf(norm):
+        grad_norm_history.append(norm.item())
+
+    # Update with gradient scaling
+    lr = get_lr(step)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+
+    if scaler is not None:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+
+    if device_type == "cuda":
+        torch.cuda.synchronize()
+
+    # Calculate training step time
+    t1_step = time.time()
+    dt_step = t1_step - t0_step
+    tokens_processed = (
+        train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+    )
+    tokens_per_sec = tokens_processed / dt_step
+
+    # Add cooling break if we detect thermal throttling
+    if (
+        tokens_per_sec < 1000 and master_process
+    ):  # Arbitrary threshold for detecting very slow steps
+        print(
+            f"WARNING: Detected very slow step ({tokens_per_sec:.2f} tokens/sec). Taking a cooling break..."
+        )
+        time.sleep(10)  # 10 second cooling break
+
+    if master_process:
+        print(
+            f"step {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt_step*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
+        )
+        # Append to log file
+        with open(log_file, "a") as f:
+            f.write(f"{step} train {loss_accum.item():.6f}\n")
+        # Append to CSV file
+        with open(csv_file, "a") as f:
+            metrics = [
+                ("train_loss", loss_accum.item()),
+                ("learning_rate", lr),
+                ("grad_norm", norm),
+                ("step_time_ms", dt_step * 1000),
+                ("tokens_per_sec", tokens_per_sec),
+            ]
+            for metric_type, value in metrics:
+                f.write(f"{step},{metric_type},{value:.6f}\n")
+
+    # Run validation and evaluation after timing the training step
     if step % SAVE_CHECKPOINT_INTERVAL == 0 or last_step:
         model.eval()
         val_loader.reset()
@@ -753,91 +947,6 @@ for step in range(start_step, MAX_STEPS):
             tokens = xgen[i, :max_length].tolist()
             decoded = enc.decode(tokens)
             print(f"rank {ddp_rank} sample {i}: {decoded}")
-
-    # do one step of the optimization
-    model.train()
-    optimizer.zero_grad()
-    loss_accum = 0.0
-    for micro_step in range(grad_accum_steps):
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
-        if ddp:
-            model.require_backward_grad_sync = micro_step == grad_accum_steps - 1
-
-        # Check gradients before backward pass
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        loss = loss / grad_accum_steps
-        loss_accum += loss.detach()
-
-        # Use gradient scaling for mixed precision
-        if scaler is not None:
-            scaled_loss = scaler.scale(loss)
-            scaled_loss.backward()
-        else:
-            loss.backward()
-
-    if ddp:
-        dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-
-    # Check gradient norm before clipping
-    unclipped_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float("inf"))
-    if (
-        torch.isnan(unclipped_norm)
-        or torch.isinf(unclipped_norm)
-        or unclipped_norm > CLIP_THRESHOLD * 10
-    ):
-        if master_process:
-            print(
-                f"WARNING: Gradient norm {unclipped_norm:.4f} too large. Skipping step."
-            )
-        optimizer.zero_grad()
-        continue
-
-    # Apply normal gradient clipping
-    clip_threshold = get_adaptive_clip_threshold()
-    norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip_threshold)
-    if not torch.isnan(norm) and not torch.isinf(norm):
-        grad_norm_history.append(norm.item())
-
-    # Update with gradient scaling
-    lr = get_lr(step)
-    for param_group in optimizer.param_groups:
-        param_group["lr"] = lr
-
-    if scaler is not None:
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        optimizer.step()
-
-    if device_type == "cuda":
-        torch.cuda.synchronize()
-    t1 = time.time()
-    dt = t1 - t0
-    tokens_processed = (
-        train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
-    )
-    tokens_per_sec = tokens_processed / dt
-
-    if master_process:
-        print(
-            f"step {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
-        )
-        # Append to log file
-        with open(log_file, "a") as f:
-            f.write(f"{step} train {loss_accum.item():.6f}\n")
-        # Append to CSV file
-        with open(csv_file, "a") as f:
-            metrics = [
-                ("train_loss", loss_accum.item()),
-                ("learning_rate", lr),
-                ("grad_norm", norm),
-                ("step_time_ms", dt * 1000),
-                ("tokens_per_sec", tokens_per_sec),
-            ]
-            for metric_type, value in metrics:
-                f.write(f"{step},{metric_type},{value:.6f}\n")
 
 if ddp:
     destroy_process_group()

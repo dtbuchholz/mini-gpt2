@@ -16,6 +16,7 @@ VOCAB_SIZE: int = int(os.environ.get("VOCAB_SIZE", "50304"))  # GPT-2 vocab size
 N_LAYER: int = int(os.environ.get("N_LAYER", "12"))  # number of layers
 N_HEAD: int = int(os.environ.get("N_HEAD", "12"))  # number of heads
 N_EMBD: int = int(os.environ.get("N_EMBD", "768"))  # embedding dimension
+BIAS: bool = os.environ.get("BIAS", "False") == "True"
 
 
 # Minimal model architecture needed for inference
@@ -26,6 +27,7 @@ class GPTConfig:
     n_layer: int = N_LAYER
     n_head: int = N_HEAD
     n_embd: int = N_EMBD
+    bias: bool = BIAS
 
 
 class CausalSelfAttention(nn.Module):
