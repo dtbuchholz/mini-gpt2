@@ -91,7 +91,7 @@ And the following environment variables for training hyperparameters:
   `6e-5`.
 - `WARMUP_STEPS`: The number of steps to warm up the learning rate for. Default is `715`.
 - `MAX_STEPS`: The number of steps to train the model for. Default is `19073`.
-- `SAVE_CHECKPOINT_STEPS`: The number of steps to save the model checkpoint. Default is `5000`.
+- `SAVE_CHECKPOINT_INTERVAL`: The number of steps to save the model checkpoint. Default is `5000`.
 - `WEIGHT_DECAY`: The weight decay to train the model with. Default is `0.1`.
 
 ## Evaluation

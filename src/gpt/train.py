@@ -18,10 +18,10 @@ load_dotenv()
 
 # Model config
 BLOCK_SIZE: int = int(os.environ.get("BLOCK_SIZE", "1024"))  # max sequence length
-VOCAB_SIZE: int = int(os.environ.get("VOCAB_SIZE", "50304"))  # GPT-2 vocab size
 N_LAYER: int = int(os.environ.get("N_LAYER", "12"))  # number of layers
 N_HEAD: int = int(os.environ.get("N_HEAD", "12"))  # number of heads
 N_EMBD: int = int(os.environ.get("N_EMBD", "768"))  # embedding dimension
+BIAS: bool = os.environ.get("BIAS", "False") == "True"
 
 # Training hyperparameters from environment variables
 TOTAL_BATCH_SIZE = int(
@@ -35,7 +35,8 @@ MIN_LR = float(
 )  # MIN_LR as 10% of MAX_LR if not explicitly set
 WARMUP_STEPS = int(os.environ.get("WARMUP_STEPS", "715"))
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "19073"))  # ~1 epoch for 10B tokens
-SAVE_CHECKPOINT_STEPS = int(os.environ.get("SAVE_CHECKPOINT_STEPS", "5000"))
+SAVE_CHECKPOINT_INTERVAL = int(os.environ.get("SAVE_CHECKPOINT_INTERVAL", "5000"))
+RUN_EVAL_INTERVAL = int(os.environ.get("RUN_EVAL_INTERVAL", "250"))
 WEIGHT_DECAY = float(os.environ.get("WEIGHT_DECAY", "0.1"))
 
 # Dataset path, and generation if not exists
@@ -48,6 +49,11 @@ if not os.path.exists(DATASET_PATH):
 grad_norm_history = deque(maxlen=100)
 CLIP_THRESHOLD = float(os.environ.get("GRAD_CLIP", "1.0"))
 ADAPTIVE_CLIP_MULTIPLIER = 2.0
+
+# Constants for vocabulary
+GPT2_VOCAB_SIZE = 50257  # Original GPT-2 vocabulary size
+# Note: 50257 is the default vocab size of the GPT-2 tokenizer, but we pad it to next multiple of 64 for efficiency
+PADDED_VOCAB_SIZE = 50304
 
 
 # -----------------------------------------------------------------------------
@@ -128,7 +134,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = BLOCK_SIZE  # max sequence length
-    vocab_size: int = VOCAB_SIZE  # GPT-2 vocab size
+    vocab_size: int = PADDED_VOCAB_SIZE  # Padded vocab size for efficiency
     n_layer: int = N_LAYER  # number of layers
     n_head: int = N_HEAD  # number of heads
     n_embd: int = N_EMBD  # embedding dimension
@@ -140,6 +146,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
 
+        # Create embeddings with padded vocab size for efficiency
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
@@ -148,7 +155,12 @@ class GPT(nn.Module):
                 ln_f=nn.LayerNorm(config.n_embd),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=BIAS)
+
+        # Zero out embeddings for padding tokens
+        with torch.no_grad():
+            self.transformer.wte.weight[GPT2_VOCAB_SIZE:].zero_()
+            self.lm_head.weight[GPT2_VOCAB_SIZE:].zero_()
 
         # weight sharing scheme
         self.transformer.wte.weight = self.lm_head.weight
@@ -204,7 +216,9 @@ class GPT(nn.Module):
             "gpt2-large": dict(n_layer=36, n_head=20, n_embd=1280),  # 774M params
             "gpt2-xl": dict(n_layer=48, n_head=25, n_embd=1600),  # 1558M params
         }[model_type]
-        config_args["vocab_size"] = 50257  # always 50257 for GPT model checkpoints
+        config_args["vocab_size"] = (
+            GPT2_VOCAB_SIZE  # always 50257 for GPT model checkpoints
+        )
         config_args["block_size"] = 1024  # always 1024 for GPT model checkpoints
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
@@ -390,7 +404,7 @@ import torch.distributed as dist
 ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
 if ddp:
     # use of DDP atm demands CUDA, we set the device appropriately according to rank
-    assert torch.cuda.is_available(), "for now i think we need CUDA for DDP"
+    assert torch.cuda.is_available(), "note: need CUDA for DDP"
     init_process_group(backend="nccl")
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
@@ -429,6 +443,7 @@ if master_process:
     print(f"- Layers: {GPTConfig.n_layer}")
     print(f"- Attention heads: {GPTConfig.n_head}")
     print(f"- Embedding dim: {GPTConfig.n_embd}")
+    print(f"- Bias: {BIAS}")
     print("\nTraining config:")
     print(f"- Total batch size: {TOTAL_BATCH_SIZE}")
     print(f"- Micro batch size: {B_CONFIG}")
@@ -465,10 +480,11 @@ val_loader = DataLoaderLite(
     split="val",
 )
 
-torch.set_float32_matmul_precision("high")
+if device_type == "cuda":
+    torch.set_float32_matmul_precision("high")
 
 # create model
-model = GPT(GPTConfig(vocab_size=VOCAB_SIZE))
+model = GPT(GPTConfig(vocab_size=PADDED_VOCAB_SIZE))
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
 model.to(device)
 
@@ -564,7 +580,7 @@ for step in range(start_step, MAX_STEPS):
 
     # once in a while evaluate our validation loss
     # note: the validation loss ranges from 0 to log(vocab_size); e.g., log(50257) ≈ 10.8
-    if step % 250 == 0 or last_step:
+    if step % SAVE_CHECKPOINT_INTERVAL == 0 or last_step:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -624,7 +640,7 @@ for step in range(start_step, MAX_STEPS):
                 )
 
             # Regular checkpoint saving
-            if step > 0 and (step % SAVE_CHECKPOINT_STEPS == 0 or last_step):
+            if step > 0 and (step % SAVE_CHECKPOINT_INTERVAL == 0 or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
                 checkpoint = {
@@ -662,7 +678,8 @@ for step in range(start_step, MAX_STEPS):
                 torch.save(checkpoint, latest_path)
 
     # once in a while evaluate hellaswag
-    if (step > 0 and step % 250 == 0 or last_step) and (not use_compile):
+    if (step > 0 and step % RUN_EVAL_INTERVAL == 0 or last_step) and (not use_compile):
+        # if (step % SAVE_CHECKPOINT_INTERVAL == 0 or last_step) and (not use_compile):
         print(f"Evaluating HellaSwag at step {step}...")
         num_correct_norm = 0
         num_total = 0
@@ -700,7 +717,9 @@ for step in range(start_step, MAX_STEPS):
                 f.write(f"{step},hellaswag_acc,{acc_norm:.6f}\n")
 
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % 250 == 0) or last_step) and (not use_compile):
+    if ((step > 0 and step % RUN_EVAL_INTERVAL == 0) or last_step) and (
+        not use_compile
+    ):
         model.eval()
         num_return_sequences = 4
         max_length = 32
