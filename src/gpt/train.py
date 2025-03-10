@@ -6,11 +6,11 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from hellaswag import render_example, iterate_examples
 from dotenv import load_dotenv
 import numpy as np
 from collections import deque
 from torch.amp import GradScaler
+from .hellaswag import render_example, iterate_examples
 
 load_dotenv()
 
